@@ -71,6 +71,31 @@ const RARITY_ALIAS_TO_EN = {
   "超级珍稀": "Super Rare", "超级珍稀": "Super Rare"
 };
 
+function setThemeState(themeDiv, checked) {
+  const partCbs = themeDiv.querySelectorAll('.parts input[type="checkbox"]');
+  partCbs.forEach(cb => { cb.checked = checked; });
+}
+
+function updateThemeCheckbox(themeDiv) {
+  const themeCb = themeDiv.querySelector('.theme-head input[type="checkbox"]');
+  const partCbs = [...themeDiv.querySelectorAll('.parts input[type="checkbox"]')];
+
+  const total = partCbs.length;
+  const checkedCount = partCbs.filter(cb => cb.checked).length;
+
+  if (checkedCount === 0) {
+    themeCb.checked = false;
+    themeCb.indeterminate = false;
+  } else if (checkedCount === total) {
+    themeCb.checked = true;
+    themeCb.indeterminate = false;
+  } else {
+    themeCb.checked = false;
+    themeCb.indeterminate = true; // 半选状态
+  }
+}
+
+
 function normRarity(x) {
   let s = String(x ?? "").trim();
   s = s.replace(/\.\d+$/, "");      // Uncommon.6
@@ -383,6 +408,13 @@ function renderTree(tree) {
       const cbSet = document.createElement("input");
       cbSet.type = "checkbox";
       cbSet.dataset.token = JSON.stringify(["SET", th.setName]);
+      
+      // ✅ 勾选 Base / Theme 时：全选/全不选下面所有 parts
+      cbSet.addEventListener("change", () => {
+        setThemeState(divTheme, cbSet.checked);
+        // 让 theme checkbox 自己状态也规范化
+        updateThemeCheckbox(divTheme);
+      });
 
       const lab = document.createElement("span");
       lab.textContent = th.theme;
@@ -400,6 +432,11 @@ function renderTree(tree) {
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.dataset.token = JSON.stringify(["PART", p.setName, p.part]);
+        
+        // ✅ 勾选任何一个 part：更新 theme 的全选/半选/全不选状态
+        cb.addEventListener("change", () => {
+          updateThemeCheckbox(divTheme);
+        });
         const span = document.createElement("span");
         span.textContent = p.part;
         row.appendChild(cb);
@@ -408,6 +445,8 @@ function renderTree(tree) {
       }
 
       divTheme.appendChild(divParts);
+      updateThemeCheckbox(divTheme);
+
       detHero.appendChild(divTheme);
     }
 
