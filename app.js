@@ -440,7 +440,6 @@ function getSelectedTokens() {
   return tokens;
 }
 
-// ---------- compute logic (kept minimal for selection test) ----------
 function compute() {
   const U = t(LANG);
   const tokens = getSelectedTokens();
@@ -448,36 +447,29 @@ function compute() {
     qs("output").textContent = U.noSelection;
     return;
   }
-  qs("output").textContent = JSON.stringify(tokens, null, 2);
-}
 
-// ---------- init & reload ----------
-async function reloadAll() {
-  renderStaticTexts();
-  qs("status").textContent = "Loading…";
+  // 1) demand
+  const demandList = computeDemand(tokens);
 
-  try {
-    RECIPES = await loadData(LANG);
-  } catch (e) {
-    qs("status").textContent = t(LANG).fetchFail;
-    qs("output").textContent = String(e);
-    return;
+  // 2) reserve + surplus-only
+  const inv = { ...INVENTORY };
+  const { useDirect, leftover, deficit } = reserveAndSurplus(demandList, inv);
+
+  // material order = current inventory table order (fixed)
+  const matsOrder = [];
+  for (const tr of qs("invBody").querySelectorAll("tr")) {
+    const key = tr.children[0].dataset.key;
+    if (key) matsOrder.push(key);
   }
 
-  const { mset, ordered } = buildMaterialSet(RECIPES);
-  MATERIAL_SET = mset;
+  // 3) plan exchanges
+  const { ops, remDef } = planExchanges(MODE, deficit, leftover, matsOrder);
 
-  for (const m of ordered) if (INVENTORY[m] == null) INVENTORY[m] = 0;
-
-  HERO_TREE = buildTree(RECIPES);
-  renderInventory(ordered);
-  renderTree(HERO_TREE);
-
-  qs("status").textContent = t(LANG).statusReady(RECIPES.length);
-  qs("output").textContent = LANG === "zh"
-    ? "勾选 Base 会全选所有部件（已修复）。"
-    : "Checking Base will select all parts (fixed).";
+  // 4) report
+  const report = formatReport(tokens, demandList, matsOrder, useDirect, deficit, leftover, ops, remDef);
+  qs("output").textContent = report;
 }
+
 
 function init() {
   // ✅ bind delegation ONCE (NOT inside language change)
