@@ -72,16 +72,18 @@ const RARITY_ALIAS_TO_EN = {
 };
 
 function setThemeState(themeDiv, checked) {
-  const partCbs = themeDiv.querySelectorAll('.parts input[type="checkbox"]');
+  const partCbs = themeDiv.querySelectorAll('input[type="checkbox"][data-role="part"]');
   partCbs.forEach(cb => { cb.checked = checked; });
 }
 
 function updateThemeCheckbox(themeDiv) {
-  const themeCb = themeDiv.querySelector('.theme-head input[type="checkbox"]');
-  const partCbs = [...themeDiv.querySelectorAll('.parts input[type="checkbox"]')];
+  const themeCb = themeDiv.querySelector('input[type="checkbox"][data-role="theme"]');
+  const partCbs = [...themeDiv.querySelectorAll('input[type="checkbox"][data-role="part"]')];
 
   const total = partCbs.length;
   const checkedCount = partCbs.filter(cb => cb.checked).length;
+
+  if (!themeCb) return;
 
   if (checkedCount === 0) {
     themeCb.checked = false;
@@ -91,9 +93,10 @@ function updateThemeCheckbox(themeDiv) {
     themeCb.indeterminate = false;
   } else {
     themeCb.checked = false;
-    themeCb.indeterminate = true; // 半选状态
+    themeCb.indeterminate = true;
   }
 }
+
 
 
 function normRarity(x) {
@@ -408,13 +411,7 @@ function renderTree(tree) {
       const cbSet = document.createElement("input");
       cbSet.type = "checkbox";
       cbSet.dataset.token = JSON.stringify(["SET", th.setName]);
-      
-      // ✅ 勾选 Base / Theme 时：全选/全不选下面所有 parts
-      cbSet.addEventListener("change", () => {
-        setThemeState(divTheme, cbSet.checked);
-        // 让 theme checkbox 自己状态也规范化
-        updateThemeCheckbox(divTheme);
-      });
+
 
       const lab = document.createElement("span");
       lab.textContent = th.theme;
@@ -431,18 +428,10 @@ function renderTree(tree) {
         row.className = "row";
         const cb = document.createElement("input");
         cb.type = "checkbox";
+        cb.dataset.role = "part";
         cb.dataset.token = JSON.stringify(["PART", p.setName, p.part]);
-        
-        // ✅ 勾选任何一个 part：更新 theme 的全选/半选/全不选状态
-        cb.addEventListener("change", () => {
-          updateThemeCheckbox(divTheme);
-        });
-        const span = document.createElement("span");
-        span.textContent = p.part;
-        row.appendChild(cb);
-        row.appendChild(span);
-        divParts.appendChild(row);
-      }
+
+
 
       divTheme.appendChild(divParts);
       updateThemeCheckbox(divTheme);
@@ -765,6 +754,30 @@ function formatReport(tokens, demandList, matsOrder, useDirect, deficitBefore, l
 async function init() {
   qs("lang").addEventListener("change", async (e)=>{
     LANG = e.target.value;
+    qs("tree").addEventListener("change", (e) => {
+  const el = e.target;
+  if (!(el instanceof HTMLInputElement)) return;
+  if (el.type !== "checkbox") return;
+
+  const themeDiv = el.closest(".theme");
+  if (!themeDiv) return;
+
+  if (el.dataset.role === "theme") {
+    // 勾选主题 => 全选/全不选该主题下所有 parts
+    const checked = el.checked;
+    const partCbs = themeDiv.querySelectorAll('input[type="checkbox"][data-role="part"]');
+    partCbs.forEach(cb => { cb.checked = checked; });
+    updateThemeCheckbox(themeDiv);
+    return;
+  }
+
+  if (el.dataset.role === "part") {
+    // 勾选部件 => 更新主题 checkbox 的 checked/indeterminate
+    updateThemeCheckbox(themeDiv);
+    return;
+  }
+});
+
     await reloadAll();
   });
 
