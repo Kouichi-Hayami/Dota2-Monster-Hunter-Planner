@@ -1,8 +1,15 @@
-// app.js (WORKING)
-// - Base(theme) checkbox will select/deselect all parts
-// - Part checkbox updates theme indeterminate state
-// - Event delegation (robust)
+// app.js (FULL WORKING VERSION)
+// - Loads recipes_en.json / recipes_zh.json
+// - Builds inventory table in fixed material order
+// - Builds target tree (Hero -> Theme -> Parts), collapsed by default
+// - Theme checkbox selects/deselects all parts; parts update theme indeterminate
+// - Compute: reserve required from inventory; use surplus-only to plan exchanges
+// - Two modes: 3first vs 6first
+// Assumption: 3->1 and 6->1 require SAME RARITY only (no duplicate name requirement), output can be specified.
 
+///////////////////////////////
+// 0) Material bilingual order
+///////////////////////////////
 const MATERIAL_ORDER_RAW = [
   "怪物精华Monster Essence",
   "怪物毛皮Monster Fur",
@@ -56,6 +63,9 @@ const EN_TO_ZH = Object.fromEntries(MATERIALS.map(x => [x.en, x.zh]));
 const ZH_TO_EN = Object.fromEntries(MATERIALS.map(x => [x.zh, x.en]));
 const COMBO_TO_EN = Object.fromEntries(MATERIALS.map(x => [x.combo, x.en]));
 
+///////////////////////////////
+// 1) Rarity
+///////////////////////////////
 const RARITY_LV = { "Common": 1, "Uncommon": 2, "Rare": 3, "Super Rare": 4 };
 const LV_RARITY = { 1: "Common", 2: "Uncommon", 3: "Rare", 4: "Super Rare" };
 
@@ -69,8 +79,6 @@ const RARITY_ALIAS_TO_EN = {
   "超级稀有": "Super Rare",
   "超稀有": "Super Rare",
 };
-
-function qs(id){ return document.getElementById(id); }
 
 function normRarity(x) {
   let s = String(x ?? "").trim();
@@ -104,6 +112,9 @@ function displayMaterial(lang, enKey) {
   return lang === "zh" ? (EN_TO_ZH[enKey] ?? enKey) : enKey;
 }
 
+///////////////////////////////
+// 2) UI text
+///////////////////////////////
 const UI = {
   en: {
     title: "MH Planner",
@@ -118,7 +129,7 @@ const UI = {
     out: "Output",
     statusReady: (n) => `Ready. Loaded ${n} recipe rows.`,
     noSelection: "Please select at least one target.",
-    fetchFail: "Failed to load data. Make sure you run a local server (python -m http.server).",
+    fetchFail: "Failed to load data. Make sure JSON exists and you run via http (GitHub Pages or python -m http.server).",
     mode3: "Low clicks (prefer 3→1; if insufficient then 6→1)",
     mode6: "Rarity-first (prefer 6→1; if needed then 3→1)",
     reportMode: (m) => `[Mode] ${m}`,
@@ -152,7 +163,7 @@ const UI = {
     out: "输出",
     statusReady: (n) => `就绪。已加载 ${n} 条配方。`,
     noSelection: "请先勾选至少一个目标。",
-    fetchFail: "加载失败。请用本地服务器运行（python -m http.server）。",
+    fetchFail: "加载失败：请确认 JSON 文件存在，并使用 http 方式运行（GitHub Pages 或 python -m http.server）。",
     mode3: "少操作（优先 3→1；不够再 6→1）",
     mode6: "稀有度优先（尽量 6→1；无奈才 3→1）",
     reportMode: (m) => `【模式】${m}`,
@@ -176,7 +187,24 @@ const UI = {
 };
 function t(lang){ return UI[lang] ?? UI.en; }
 
-// ---------- selection helpers (THE FIX) ----------
+///////////////////////////////
+// 3) Global state
+///////////////////////////////
+let LANG = "en";
+let MODE = "3first";
+let RECIPES = [];
+let MATERIAL_SET = new Map(); // enKey -> {rarity, rarity_lv, order}
+let HERO_TREE = [];
+let INVENTORY = {}; // enKey -> int
+
+///////////////////////////////
+// 4) DOM helpers
+///////////////////////////////
+function qs(id){ return document.getElementById(id); }
+
+///////////////////////////////
+// 5) Theme checkbox linkage (FIXED)
+///////////////////////////////
 function setThemeState(themeDiv, checked) {
   const partCbs = themeDiv.querySelectorAll('input[type="checkbox"][data-role="part"]');
   partCbs.forEach(cb => { cb.checked = checked; });
@@ -202,15 +230,9 @@ function updateThemeCheckbox(themeDiv) {
   }
 }
 
-// ---------- global state ----------
-let LANG = "en";
-let MODE = "3first";
-let RECIPES = [];
-let MATERIAL_SET = new Map();
-let HERO_TREE = [];
-let INVENTORY = {};
-
-// ---------- load data ----------
+///////////////////////////////
+// 6) Data load
+///////////////////////////////
 async function loadData(lang) {
   const path = (lang === "zh") ? "data/recipes_zh.json" : "data/recipes_en.json";
   const res = await fetch(path);
@@ -311,7 +333,9 @@ function buildTree(recipes) {
   return heroes;
 }
 
-// ---------- render ----------
+///////////////////////////////
+// 7) Render
+///////////////////////////////
 function renderStaticTexts() {
   const U = t(LANG);
   document.title = U.title;
@@ -380,13 +404,12 @@ function renderTree(tree) {
       const divTheme = document.createElement("div");
       divTheme.className = "theme";
 
-      // label makes clicking text toggle checkbox
       const head = document.createElement("label");
       head.className = "theme-head";
 
       const cbTheme = document.createElement("input");
       cbTheme.type = "checkbox";
-      cbTheme.dataset.role = "theme"; // ✅ IMPORTANT
+      cbTheme.dataset.role = "theme";
       cbTheme.dataset.token = JSON.stringify(["SET", th.setName]);
 
       const lab = document.createElement("span");
@@ -405,7 +428,7 @@ function renderTree(tree) {
 
         const cb = document.createElement("input");
         cb.type = "checkbox";
-        cb.dataset.role = "part"; // ✅ IMPORTANT
+        cb.dataset.role = "part";
         cb.dataset.token = JSON.stringify(["PART", p.setName, p.part]);
 
         const span = document.createElement("span");
@@ -440,6 +463,296 @@ function getSelectedTokens() {
   return tokens;
 }
 
+///////////////////////////////
+// 8) Demand/reserve
+///////////////////////////////
+function computeDemand(tokens) {
+  const setWanted = new Set(tokens.filter(t=>t[0]==="SET").map(t=>t[1]));
+  const partWanted = new Set(tokens.filter(t=>t[0]==="PART").map(t=>`${t[1]}||${t[2]}`));
+
+  const need = new Map();
+  const rarity = new Map();
+
+  for (const r of RECIPES) {
+    const isSet = setWanted.has(r.setName);
+    const isPart = partWanted.has(`${r.setName}||${r.part}`);
+    if (!isSet && !isPart) continue;
+
+    need.set(r.material, (need.get(r.material) ?? 0) + r.amount);
+    if (!rarity.has(r.material)) rarity.set(r.material, r.rarity);
+  }
+
+  const ordered = [];
+  for (const enKey of MATERIAL_ORDER_EN) {
+    if (!need.has(enKey)) continue;
+    ordered.push({ material: enKey, need: need.get(enKey), rarity: rarity.get(enKey) });
+  }
+  for (const [m, v] of need.entries()) {
+    if (MATERIAL_ORDER_EN.includes(m)) continue;
+    ordered.push({ material: m, need: v, rarity: rarity.get(m) });
+  }
+  return ordered;
+}
+
+function reserveAndSurplus(demandList, inv) {
+  const useDirect = {};
+  const leftover = {};
+  const deficit = {};
+
+  const needMap = {};
+  for (const d of demandList) needMap[d.material] = d.need;
+
+  const allMats = [...new Set([...MATERIAL_ORDER_EN, ...Object.keys(needMap)])];
+
+  for (const m of allMats) {
+    const have = inv[m] ?? 0;
+    const need = needMap[m] ?? 0;
+    const use = Math.min(have, need);
+    if (use > 0) useDirect[m] = use;
+    const left = have - use;
+    const def = need - use;
+    if (left > 0) leftover[m] = left;
+    if (def > 0) deficit[m] = def;
+  }
+  return { useDirect, leftover, deficit };
+}
+
+///////////////////////////////
+// 9) Exchange planning (two modes)
+///////////////////////////////
+function materialsByRarity(materialOrder) {
+  const by = {1:[],2:[],3:[],4:[]};
+  for (const m of materialOrder) {
+    const info = MATERIAL_SET.get(m);
+    if (!info) continue;
+    by[info.rarity_lv].push(m);
+  }
+  return by;
+}
+
+function takeFromSurplus(surplus, candidatesInOrder, needQty) {
+  const taken = new Map();
+  let remaining = needQty;
+
+  for (let i = candidatesInOrder.length - 1; i >= 0; i--) {
+    const m = candidatesInOrder[i];
+    if (remaining <= 0) break;
+    const have = surplus[m] ?? 0;
+    if (have <= 0) continue;
+    const use = Math.min(have, remaining);
+    surplus[m] = have - use;
+    taken.set(m, (taken.get(m) ?? 0) + use);
+    remaining -= use;
+  }
+
+  if (remaining > 0) {
+    for (const [m, q] of taken.entries()) surplus[m] = (surplus[m] ?? 0) + q;
+    return null;
+  }
+
+  const out = [];
+  for (const m of candidatesInOrder) {
+    if (taken.has(m)) out.push([m, taken.get(m)]);
+  }
+  return out;
+}
+
+function planExchanges(mode, deficit, leftover, materialOrder) {
+  const by = materialsByRarity(materialOrder);
+  const matToLv = {};
+  for (const m of materialOrder) matToLv[m] = MATERIAL_SET.get(m)?.rarity_lv ?? 1;
+
+  const surplus = {};
+  for (const m of materialOrder) surplus[m] = leftover[m] ?? 0;
+
+  const rem = {...deficit};
+  const ops = [];
+
+  const surplusCount = (lv) => by[lv].reduce((s,m)=>s+(surplus[m]??0),0);
+
+  const deficitsInOrderForLv = (lv) => {
+    const out = [];
+    for (const m of materialOrder) {
+      if (rem[m] > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
+    }
+    for (const m of Object.keys(rem)) {
+      if (materialOrder.includes(m)) continue;
+      if (rem[m] > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
+    }
+    return out;
+  };
+
+  const do3 = (lv, target, times) => {
+    if (times <= 0) return true;
+    const consumed = takeFromSurplus(surplus, by[lv], 3*times);
+    if (!consumed) return false;
+    ops.push({kind:"3to1", from:lv, to:lv, target, times, consumed});
+    rem[target] = Math.max(0, (rem[target]??0) - times);
+    if (rem[target] === 0) delete rem[target];
+    return true;
+  };
+
+  const do6 = (lv, target, times) => {
+    if (times <= 0) return true;
+    const consumed = takeFromSurplus(surplus, by[lv], 6*times);
+    if (!consumed) return false;
+    ops.push({kind:"6to1", from:lv, to:lv+1, target, times, consumed});
+    rem[target] = Math.max(0, (rem[target]??0) - times);
+    if (rem[target] === 0) delete rem[target];
+    return true;
+  };
+
+  for (const lv of [4,3,2,1]) {
+    if (lv === 4) {
+      for (const [target, need] of deficitsInOrderForLv(4)) {
+        const possible = Math.floor(surplusCount(3)/6);
+        const take = Math.min(need, possible);
+        if (take > 0) do6(3, target, take);
+      }
+      continue;
+    }
+
+    for (let [target, need] of deficitsInOrderForLv(lv)) {
+      if (need <= 0) continue;
+
+      if (mode === "3first") {
+        const possible3 = Math.floor(surplusCount(lv)/3);
+        const take3 = Math.min(need, possible3);
+        if (take3 > 0) {
+          do3(lv, target, take3);
+          need = rem[target] ?? 0;
+        }
+        if (need > 0 && lv > 1) {
+          const possible6 = Math.floor(surplusCount(lv-1)/6);
+          const take6 = Math.min(need, possible6);
+          if (take6 > 0) do6(lv-1, target, take6);
+        }
+      } else {
+        if (lv > 1) {
+          const possible6 = Math.floor(surplusCount(lv-1)/6);
+          const take6 = Math.min(need, possible6);
+          if (take6 > 0) {
+            do6(lv-1, target, take6);
+            need = rem[target] ?? 0;
+          }
+        }
+        if (need > 0) {
+          const possible3 = Math.floor(surplusCount(lv)/3);
+          const take3 = Math.min(need, possible3);
+          if (take3 > 0) do3(lv, target, take3);
+        }
+      }
+    }
+  }
+
+  const remDef = {};
+  for (const [k,v] of Object.entries(rem)) if (v > 0) remDef[k] = v;
+  return {ops, remDef};
+}
+
+///////////////////////////////
+// 10) Report
+///////////////////////////////
+function formatReport(tokens, demandList, matsOrder, useDirect, deficitBefore, leftover, ops, deficitAfter) {
+  const U = t(LANG);
+  const mname = (enKey)=> displayMaterial(LANG, enKey);
+
+  const listInOrder = (obj) => {
+    const out = [];
+    for (const m of matsOrder) if ((obj[m] ?? 0) > 0) out.push([m, obj[m]]);
+    for (const m of Object.keys(obj)) {
+      if (matsOrder.includes(m)) continue;
+      if ((obj[m] ?? 0) > 0) out.push([m, obj[m]]);
+    }
+    return out;
+  };
+
+  const lines = [];
+  const modeLabel = (MODE === "3first") ? U.mode3 : U.mode6;
+
+  lines.push(U.reportMode(modeLabel));
+  lines.push("");
+  lines.push(U.selected(tokens.length));
+  for (const tok of tokens) {
+    if (tok[0] === "SET") lines.push(U.set(tok[1]));
+    else lines.push(U.part(tok[1], tok[2]));
+  }
+  lines.push("");
+
+  lines.push(U.sec1);
+  if (!demandList.length) lines.push(U.none);
+  else demandList.forEach(d => lines.push(`- ${mname(d.material)} ×${d.need} (${d.rarity})`));
+  lines.push("");
+
+  lines.push(U.sec2);
+  const resv = listInOrder(useDirect);
+  if (!resv.length) lines.push(U.none);
+  else resv.forEach(([m,v])=> lines.push(`- ${mname(m)} ×${v} ✅`));
+  lines.push("");
+
+  lines.push(U.sec3);
+  const deb = listInOrder(deficitBefore);
+  if (!deb.length) lines.push(U.none + " ✅");
+  else deb.forEach(([m,v])=> lines.push(`- ${mname(m)} ×${v}`));
+  lines.push("");
+
+  lines.push(U.sec4);
+  const sup = listInOrder(leftover);
+  if (!sup.length) lines.push(U.none);
+  else sup.forEach(([m,v])=> lines.push(`- ${mname(m)} ×${v}`));
+  lines.push("");
+
+  lines.push(U.sec5);
+  if (!ops.length) lines.push(U.none);
+  else {
+    let i = 1;
+    for (const op of ops) {
+      const breakdown = op.consumed.length
+        ? op.consumed.map(([m,q])=>`${mname(m)}×${q}`).join(" + ")
+        : "-";
+      if (op.kind === "3to1") {
+        lines.push(U.step3(i, LV_RARITY[op.from], 3*op.times, breakdown, mname(op.target), op.times));
+      } else {
+        lines.push(U.step6(i, LV_RARITY[op.from], LV_RARITY[op.to], 6*op.times, breakdown, mname(op.target), op.times));
+      }
+      i++;
+    }
+  }
+  lines.push("");
+
+  lines.push(U.sec6);
+  const daf = listInOrder(deficitAfter);
+  if (!daf.length) {
+    lines.push(U.none + " ✅");
+    lines.push("");
+    lines.push(U.ok);
+  } else {
+    daf.forEach(([m,v])=> lines.push(`- ${mname(m)} ×${v}`));
+    lines.push("");
+    lines.push(U.notOk);
+  }
+
+  return lines.join("\n");
+}
+
+///////////////////////////////
+// 11) Compute
+///////////////////////////////
+function getSelectedTokens() {
+  const checks = qs("tree").querySelectorAll('input[type="checkbox"]');
+  const tokens = [];
+  const seen = new Set();
+  for (const cb of checks) {
+    if (!cb.checked) continue;
+    const tok = JSON.parse(cb.dataset.token);
+    const key = JSON.stringify(tok);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tokens.push(tok);
+  }
+  return tokens;
+}
+
 function compute() {
   const U = t(LANG);
   const tokens = getSelectedTokens();
@@ -448,31 +761,57 @@ function compute() {
     return;
   }
 
-  // 1) demand
   const demandList = computeDemand(tokens);
-
-  // 2) reserve + surplus-only
   const inv = { ...INVENTORY };
   const { useDirect, leftover, deficit } = reserveAndSurplus(demandList, inv);
 
-  // material order = current inventory table order (fixed)
+  // fixed order = current inventory table
   const matsOrder = [];
   for (const tr of qs("invBody").querySelectorAll("tr")) {
     const key = tr.children[0].dataset.key;
     if (key) matsOrder.push(key);
   }
 
-  // 3) plan exchanges
   const { ops, remDef } = planExchanges(MODE, deficit, leftover, matsOrder);
-
-  // 4) report
   const report = formatReport(tokens, demandList, matsOrder, useDirect, deficit, leftover, ops, remDef);
   qs("output").textContent = report;
 }
 
+///////////////////////////////
+// 12) Reload all
+///////////////////////////////
+async function reloadAll() {
+  renderStaticTexts();
+  qs("status").textContent = "Loading…";
 
+  try {
+    RECIPES = await loadData(LANG);
+  } catch (e) {
+    qs("status").textContent = t(LANG).fetchFail;
+    qs("output").textContent = String(e);
+    return;
+  }
+
+  const { mset, ordered } = buildMaterialSet(RECIPES);
+  MATERIAL_SET = mset;
+
+  for (const m of ordered) if (INVENTORY[m] == null) INVENTORY[m] = 0;
+
+  HERO_TREE = buildTree(RECIPES);
+  renderInventory(ordered);
+  renderTree(HERO_TREE);
+
+  qs("status").textContent = t(LANG).statusReady(RECIPES.length);
+  qs("output").textContent = LANG === "zh"
+    ? "已就绪：勾选 Base 会全选所有部件。"
+    : "Ready: checking Base selects all parts.";
+}
+
+///////////////////////////////
+// 13) Init (IMPORTANT: bind tree change ONCE here)
+///////////////////////////////
 function init() {
-  // ✅ bind delegation ONCE (NOT inside language change)
+  // ✅ Event delegation: base/theme toggles all children
   qs("tree").addEventListener("change", (e) => {
     const el = e.target;
     if (!(el instanceof HTMLInputElement)) return;
@@ -516,4 +855,3 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
-
