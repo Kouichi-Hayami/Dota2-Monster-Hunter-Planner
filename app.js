@@ -1,11 +1,16 @@
-// app.js (FULL WORKING VERSION)
+// app.js (FULL WORKING VERSION - UPDATED EXCHANGE RULES)
+//
+// UPDATED RULES (IMPORTANT):
+// - 3→1: MUST consume 3 of the SAME material (same rarity). No mixing.
+// - 6→1: can consume ANY 6 materials of the SAME rarity (mixing allowed).
+//
+// Other features:
 // - Loads recipes_en.json / recipes_zh.json
 // - Builds inventory table in fixed material order
 // - Builds target tree (Hero -> Theme -> Parts), collapsed by default
 // - Theme checkbox selects/deselects all parts; parts update theme indeterminate
 // - Compute: reserve required from inventory; use surplus-only to plan exchanges
 // - Two modes: 3first vs 6first
-// Assumption: 3->1 and 6->1 require SAME RARITY only (no duplicate name requirement), output can be specified.
 
 ///////////////////////////////
 // 0) Material bilingual order
@@ -71,13 +76,9 @@ const LV_RARITY = { 1: "Common", 2: "Uncommon", 3: "Rare", 4: "Super Rare" };
 
 const RARITY_ALIAS_TO_EN = {
   "普通": "Common",
-  "常见": "Common",
   "罕见": "Uncommon",
-  "不常见": "Uncommon",
   "稀有": "Rare",
   "超级珍稀": "Super Rare",
-  "超级稀有": "Super Rare",
-  "超稀有": "Super Rare",
 };
 
 function normRarity(x) {
@@ -164,15 +165,15 @@ const UI = {
     statusReady: (n) => `就绪。已加载 ${n} 条配方。`,
     noSelection: "请先勾选至少一个目标。",
     fetchFail: "加载失败：请确认 JSON 文件存在，并使用 http 方式运行（GitHub Pages 或 python -m http.server）。",
-    mode3: "少操作（优先 3→1；不够再 6→1）",
-    mode6: "稀有度优先（尽量 6→1；无奈才 3→1）",
+    mode3: "少操作（优先 3→1；再 6→1）",
+    mode6: "稀有度优先（尽量 6→1；再 3→1）",
     reportMode: (m) => `【模式】${m}`,
     selected: (n) => `你选择了 ${n} 个目标：`,
     set: (name) => `- 整套：${name}`,
     part: (setName, part) => `- 部件：${setName} / ${part}`,
     sec1: "## 1) 目标总需求（核对用）",
     sec2: "## 2) 直接合成清单",
-    sec3: "## 3) 仍缺材料（需要兑换/升阶补）",
+    sec3: "## 3) 仍缺材料",
     sec4: "## 4) 可用于兑换的多余材料",
     sec5: "## 5) 兑换步骤",
     sec6: "## 6) 最终仍缺",
@@ -193,9 +194,9 @@ function t(lang){ return UI[lang] ?? UI.en; }
 let LANG = "en";
 let MODE = "3first";
 let RECIPES = [];
-let MATERIAL_SET = new Map(); // enKey -> {rarity, rarity_lv, order}
+let MATERIAL_SET = new Map();
 let HERO_TREE = [];
-let INVENTORY = {}; // enKey -> int
+let INVENTORY = {};
 
 ///////////////////////////////
 // 4) DOM helpers
@@ -203,7 +204,7 @@ let INVENTORY = {}; // enKey -> int
 function qs(id){ return document.getElementById(id); }
 
 ///////////////////////////////
-// 5) Theme checkbox linkage (FIXED)
+// 5) Theme checkbox linkage
 ///////////////////////////////
 function setThemeState(themeDiv, checked) {
   const partCbs = themeDiv.querySelectorAll('input[type="checkbox"][data-role="part"]');
@@ -254,9 +255,7 @@ async function loadData(lang) {
 
 function buildMaterialSet(recipes) {
   const rarityByMat = new Map();
-  for (const row of recipes) {
-    if (!rarityByMat.has(row.material)) rarityByMat.set(row.material, row.rarity);
-  }
+  for (const row of recipes) if (!rarityByMat.has(row.material)) rarityByMat.set(row.material, row.rarity);
 
   const orderMap = new Map(MATERIAL_ORDER_EN.map((m, i) => [m, i]));
   const unknowns = [];
@@ -518,7 +517,7 @@ function reserveAndSurplus(demandList, inv) {
 }
 
 ///////////////////////////////
-// 9) Exchange planning (two modes)
+// 9) Exchange planning (UPDATED RULES)
 ///////////////////////////////
 function materialsByRarity(materialOrder) {
   const by = {1:[],2:[],3:[],4:[]};
@@ -530,7 +529,22 @@ function materialsByRarity(materialOrder) {
   return by;
 }
 
-function takeFromSurplus(surplus, candidatesInOrder, needQty) {
+// NEW: for 3→1, must take 3*times from ONE material only
+function takeSameFromSurplus(surplus, candidatesInOrder, needQty) {
+  // Prefer consuming from later materials (end of list) to preserve earlier
+  for (let i = candidatesInOrder.length - 1; i >= 0; i--) {
+    const m = candidatesInOrder[i];
+    const have = surplus[m] ?? 0;
+    if (have >= needQty) {
+      surplus[m] = have - needQty;
+      return [[m, needQty]]; // breakdown = single material
+    }
+  }
+  return null;
+}
+
+// Existing: for 6→1, can mix (same rarity only)
+function takeMixedFromSurplus(surplus, candidatesInOrder, needQty) {
   const taken = new Map();
   let remaining = needQty;
 
@@ -559,6 +573,7 @@ function takeFromSurplus(surplus, candidatesInOrder, needQty) {
 
 function planExchanges(mode, deficit, leftover, materialOrder) {
   const by = materialsByRarity(materialOrder);
+
   const matToLv = {};
   for (const m of materialOrder) matToLv[m] = MATERIAL_SET.get(m)?.rarity_lv ?? 1;
 
@@ -568,33 +583,43 @@ function planExchanges(mode, deficit, leftover, materialOrder) {
   const rem = {...deficit};
   const ops = [];
 
-  const surplusCount = (lv) => by[lv].reduce((s,m)=>s+(surplus[m]??0),0);
+  const surplusCountMixed = (lv) => by[lv].reduce((s,m)=>s+(surplus[m]??0),0);
+  const surplusCountSameTriples = (lv) => {
+    // how many 3→1 ops possible under "same material" constraint?
+    let totalTriples = 0;
+    for (const m of by[lv]) {
+      totalTriples += Math.floor((surplus[m] ?? 0) / 3);
+    }
+    return totalTriples; // number of times you can do 3→1
+  };
 
   const deficitsInOrderForLv = (lv) => {
     const out = [];
     for (const m of materialOrder) {
-      if (rem[m] > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
+      if ((rem[m] ?? 0) > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
     }
     for (const m of Object.keys(rem)) {
       if (materialOrder.includes(m)) continue;
-      if (rem[m] > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
+      if ((rem[m] ?? 0) > 0 && matToLv[m] === lv) out.push([m, rem[m]]);
     }
     return out;
   };
 
   const do3 = (lv, target, times) => {
     if (times <= 0) return true;
-    const consumed = takeFromSurplus(surplus, by[lv], 3*times);
-    if (!consumed) return false;
-    ops.push({kind:"3to1", from:lv, to:lv, target, times, consumed});
-    rem[target] = Math.max(0, (rem[target]??0) - times);
-    if (rem[target] === 0) delete rem[target];
+    for (let k = 0; k < times; k++) {
+      const consumed = takeSameFromSurplus(surplus, by[lv], 3);
+      if (!consumed) return false;
+      ops.push({kind:"3to1", from:lv, to:lv, target, times:1, consumed});
+      rem[target] = Math.max(0, (rem[target]??0) - 1);
+      if (rem[target] === 0) delete rem[target];
+    }
     return true;
   };
 
   const do6 = (lv, target, times) => {
     if (times <= 0) return true;
-    const consumed = takeFromSurplus(surplus, by[lv], 6*times);
+    const consumed = takeMixedFromSurplus(surplus, by[lv], 6*times);
     if (!consumed) return false;
     ops.push({kind:"6to1", from:lv, to:lv+1, target, times, consumed});
     rem[target] = Math.max(0, (rem[target]??0) - times);
@@ -602,10 +627,12 @@ function planExchanges(mode, deficit, leftover, materialOrder) {
     return true;
   };
 
+  // Process from highest rarity down
   for (const lv of [4,3,2,1]) {
     if (lv === 4) {
+      // super rare must come from rare via 6->1 (mixed allowed)
       for (const [target, need] of deficitsInOrderForLv(4)) {
-        const possible = Math.floor(surplusCount(3)/6);
+        const possible = Math.floor(surplusCountMixed(3)/6);
         const take = Math.min(need, possible);
         if (take > 0) do6(3, target, take);
       }
@@ -616,28 +643,32 @@ function planExchanges(mode, deficit, leftover, materialOrder) {
       if (need <= 0) continue;
 
       if (mode === "3first") {
-        const possible3 = Math.floor(surplusCount(lv)/3);
+        // 3->1 within same rarity FIRST (same-material constraint)
+        const possible3 = surplusCountSameTriples(lv);
         const take3 = Math.min(need, possible3);
         if (take3 > 0) {
           do3(lv, target, take3);
           need = rem[target] ?? 0;
         }
+        // then 6->1 from lower rarity if still missing (mixed allowed)
         if (need > 0 && lv > 1) {
-          const possible6 = Math.floor(surplusCount(lv-1)/6);
+          const possible6 = Math.floor(surplusCountMixed(lv-1)/6);
           const take6 = Math.min(need, possible6);
           if (take6 > 0) do6(lv-1, target, take6);
         }
       } else {
+        // 6->1 from lower rarity FIRST (mixed allowed)
         if (lv > 1) {
-          const possible6 = Math.floor(surplusCount(lv-1)/6);
+          const possible6 = Math.floor(surplusCountMixed(lv-1)/6);
           const take6 = Math.min(need, possible6);
           if (take6 > 0) {
             do6(lv-1, target, take6);
             need = rem[target] ?? 0;
           }
         }
+        // last resort 3->1 within same rarity (same-material constraint)
         if (need > 0) {
-          const possible3 = Math.floor(surplusCount(lv)/3);
+          const possible3 = surplusCountSameTriples(lv);
           const take3 = Math.min(need, possible3);
           if (take3 > 0) do3(lv, target, take3);
         }
@@ -738,21 +769,6 @@ function formatReport(tokens, demandList, matsOrder, useDirect, deficitBefore, l
 ///////////////////////////////
 // 11) Compute
 ///////////////////////////////
-function getSelectedTokens() {
-  const checks = qs("tree").querySelectorAll('input[type="checkbox"]');
-  const tokens = [];
-  const seen = new Set();
-  for (const cb of checks) {
-    if (!cb.checked) continue;
-    const tok = JSON.parse(cb.dataset.token);
-    const key = JSON.stringify(tok);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    tokens.push(tok);
-  }
-  return tokens;
-}
-
 function compute() {
   const U = t(LANG);
   const tokens = getSelectedTokens();
@@ -765,7 +781,6 @@ function compute() {
   const inv = { ...INVENTORY };
   const { useDirect, leftover, deficit } = reserveAndSurplus(demandList, inv);
 
-  // fixed order = current inventory table
   const matsOrder = [];
   for (const tr of qs("invBody").querySelectorAll("tr")) {
     const key = tr.children[0].dataset.key;
@@ -803,15 +818,15 @@ async function reloadAll() {
 
   qs("status").textContent = t(LANG).statusReady(RECIPES.length);
   qs("output").textContent = LANG === "zh"
-    ? "已就绪：勾选 Base 会全选所有部件。"
-    : "Ready: checking Base selects all parts.";
+    ? "已就绪：3→1 需要同一种材料；6→1 可混搭（同稀有度）。"
+    : "Ready: 3→1 needs same material; 6→1 can mix (same rarity).";
 }
 
 ///////////////////////////////
-// 13) Init (IMPORTANT: bind tree change ONCE here)
+// 13) Init
 ///////////////////////////////
 function init() {
-  // ✅ Event delegation: base/theme toggles all children
+  // Event delegation for tree checkboxes
   qs("tree").addEventListener("change", (e) => {
     const el = e.target;
     if (!(el instanceof HTMLInputElement)) return;
