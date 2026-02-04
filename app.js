@@ -145,7 +145,7 @@ const UI = {
     sec6: "## 6) Final remaining deficits",
     none: "- (none)",
     ok: "✅ Conclusion: Using surplus-only exchanges, you can complete the selected targets.",
-    notOk: "⚠️ Conclusion: Using surplus-only exchanges, you still cannot fill the deficits (usually highest rarity not enough).",
+    notOk: "⚠️ Conclusion: Using surplus-only exchanges, you still cannot fill the deficits.",
     step3: (i, rar, cons, breakdown, target, times) =>
       `${i}. 3→1 (${rar}): consume ${cons} (${breakdown})\n   Output select: ${target} ×${times}`,
     step6: (i, r1, r2, cons, breakdown, target, times) =>
@@ -179,7 +179,7 @@ const UI = {
     sec6: "## 6) 最终仍缺",
     none: "- （无）",
     ok: "✅ 结论：只用多余材料兑换，你可以补齐所选目标。",
-    notOk: "⚠️ 结论：只用多余材料兑换，你仍无法补齐缺口（通常最高稀有度不够）。",
+    notOk: "⚠️ 结论：只用多余材料兑换，你仍无法补齐缺口。",
     step3: (i, rar, cons, breakdown, target, times) =>
       `${i}. 3→1（${rar}）：消耗 ${cons}（${breakdown}）\n   产出请选择：${target} ×${times}`,
     step6: (i, r1, r2, cons, breakdown, target, times) =>
