@@ -179,7 +179,7 @@ const UI = {
     sec6: "## 6) 最终仍缺",
     none: "- （无）",
     ok: "✅ 结论：只用多余材料兑换，你可以补齐所选目标。",
-    notOk: "⚠️ 结论：只用多余材料兑换，你仍无法补齐缺口（通常最高稀有度不够）。",
+    notOk: "⚠️ 结论：只用多余材料兑换，你仍无法补齐缺口。",
     step3: (i, rar, cons, breakdown, target, times) =>
       `${i}. 3→1（${rar}）：消耗 ${cons}（${breakdown}）\n   产出请选择：${target} ×${times}`,
     step6: (i, r1, r2, cons, breakdown, target, times) =>
