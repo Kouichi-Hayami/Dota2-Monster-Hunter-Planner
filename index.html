@@ -95,3 +95,387 @@
 <script src="app.js"></script>
 </body>
 </html>
+/***********************
+ * OCR -> Fill Inventory
+ * Require:
+ * - index.html includes:
+ *   #shotFile #autoRoiBtn #manualRoiBtn #ocrBtn #ocrCanvas
+ * - tesseract.js loaded before app.js
+ ***********************/
+function initOcrUI() {
+  const shotFile = document.getElementById("shotFile");
+  const autoRoiBtn = document.getElementById("autoRoiBtn");
+  const manualRoiBtn = document.getElementById("manualRoiBtn");
+  const ocrBtn = document.getElementById("ocrBtn");
+  const ocrCanvas = document.getElementById("ocrCanvas");
+  const statusEl = document.getElementById("status");
+
+  // 如果用户没加 OCR 控件，直接跳过（不影响主功能）
+  if (!shotFile || !autoRoiBtn || !manualRoiBtn || !ocrBtn || !ocrCanvas) return;
+  if (typeof Tesseract === "undefined") {
+    if (statusEl) statusEl.textContent = "Tesseract not loaded.";
+    return;
+  }
+
+  // 固定 36 个材料：3 common / 18 uncommon / 12 rare / 3 super rare
+  const TOTAL_SLOTS = 36;
+
+  // ⚠️ 这里必须与你库存表使用的英文 key 完全一致（你前面用的 normMaterialToEN 的英文）
+  const MATERIAL_ORDER_EN_FIXED = [
+    "Monster Essence",
+    "Monster Fur",
+    "Monster Claws",
+    "Odogaron Sinew",
+    "Odogaron Hardfang",
+    "Odogaron Scale",
+    "Zinogre Electrofur",
+    "Zinogre Deathly Shocker",
+    "Zinogre Cortex",
+    "Rathalos Carapace",
+    "Rathalos Wings",
+    "Rathalos Tail",
+    "Kirin Thunderhorn",
+    "Kirin Hide",
+    "Kirin Mane",
+    "Ancient Bone",
+    "Kestodon Shell",
+    "Bullfango Head",
+    "Large Barrel",
+    "Gunpowder",
+    "Iron Ore",
+    "Odogaron Shard",
+    "Odogaron Mantle",
+    "Zinogre Hardhorn",
+    "Zinogre Skymerald",
+    "Rathalos Ruby",
+    "Rathalos Plate",
+    "Kirin Azure Horn",
+    "Large Elder Dragon Gem",
+    "Wyvern Gem",
+    "Warped Bone",
+    "Sinister Cloth",
+    "Devils Blight",
+    "Palico Voucher",
+    "Poogie Voucher",
+    "Prismatic Pigment"
+  ];
+
+  // --- state ---
+  let img = new Image();
+  let imgLoaded = false;
+
+  // roi in original image pixel coords: {x,y,w,h}
+  let roi = null;
+
+  // manual ROI selection
+  let manualMode = false;
+  let clickPts = [];
+
+  // canvas context
+  const cctx = ocrCanvas.getContext("2d", { willReadFrequently: true });
+  let displayScale = 1;
+
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  function drawPreview() {
+    if (!imgLoaded) return;
+
+    // fit preview width
+    const maxW = Math.min(window.innerWidth - 40, 1400);
+    const scale = Math.min(1, maxW / img.naturalWidth);
+    displayScale = scale;
+
+    ocrCanvas.width = Math.floor(img.naturalWidth * scale);
+    ocrCanvas.height = Math.floor(img.naturalHeight * scale);
+
+    cctx.clearRect(0, 0, ocrCanvas.width, ocrCanvas.height);
+    cctx.drawImage(img, 0, 0, ocrCanvas.width, ocrCanvas.height);
+
+    if (roi) {
+      const rx = roi.x * displayScale;
+      const ry = roi.y * displayScale;
+      const rw = roi.w * displayScale;
+      const rh = roi.h * displayScale;
+      cctx.save();
+      cctx.strokeStyle = "rgba(0,255,160,0.95)";
+      cctx.lineWidth = 3;
+      cctx.strokeRect(rx, ry, rw, rh);
+      cctx.fillStyle = "rgba(0,255,160,0.15)";
+      cctx.fillRect(rx, ry, rw, rh);
+      cctx.restore();
+    }
+  }
+
+  function cleanNumber(text) {
+    const t = (text || "").replace(/[^\d]/g, "");
+    return t ? (parseInt(t, 10) || 0) : 0;
+  }
+
+  // 简单二值化 + 放大，提升数字识别率
+  function preprocessDigitPatch(imageData, scaleUp = 3) {
+    const { width, height, data } = imageData;
+    const gray = new Uint8ClampedArray(width * height);
+
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      gray[p] = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+    }
+
+    let sum = 0;
+    for (let i = 0; i < gray.length; i++) sum += gray[i];
+    const mean = sum / gray.length;
+
+    const bin = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < gray.length; i++) {
+      // 阈值略偏亮：让白字更突出
+      bin[i] = gray[i] > (mean + 12) ? 255 : 0;
+    }
+
+    const outW = width * scaleUp;
+    const outH = height * scaleUp;
+    const out = new ImageData(outW, outH);
+
+    for (let y = 0; y < outH; y++) {
+      const oy = Math.floor(y / scaleUp);
+      for (let x = 0; x < outW; x++) {
+        const ox = Math.floor(x / scaleUp);
+        const v = bin[oy * width + ox];
+        const idx = (y * outW + x) * 4;
+        out.data[idx] = v;
+        out.data[idx + 1] = v;
+        out.data[idx + 2] = v;
+        out.data[idx + 3] = 255;
+      }
+    }
+    return out;
+  }
+
+  // Auto ROI: OCR bottom area to find "MY MATERIALS" then infer the bar area
+  async function autoFindRoi() {
+    setStatus("Auto ROI… (OCR bottom half)");
+
+    const W = ocrCanvas.width, H = ocrCanvas.height;
+    const cropY = Math.floor(H * 0.55);
+    const cropH = H - cropY;
+
+    const imgData = cctx.getImageData(0, cropY, W, cropH);
+
+    const tmp = document.createElement("canvas");
+    tmp.width = imgData.width;
+    tmp.height = imgData.height;
+    tmp.getContext("2d").putImageData(imgData, 0, 0);
+
+    // downscale for speed
+    const down = 0.55;
+    const scaled = document.createElement("canvas");
+    scaled.width = Math.floor(tmp.width * down);
+    scaled.height = Math.floor(tmp.height * down);
+    scaled.getContext("2d").drawImage(tmp, 0, 0, scaled.width, scaled.height);
+
+    const worker = await Tesseract.createWorker("eng");
+    await worker.setParameters({
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "
+    });
+    const { data } = await worker.recognize(scaled);
+    await worker.terminate();
+
+    const words = data.words || [];
+    let hit = null;
+
+    // 找 MATERIAL / MY
+    for (const w of words) {
+      const txt = (w.text || "").toUpperCase();
+      if (txt.includes("MATERIAL")) { hit = w; break; }
+    }
+    if (!hit) {
+      for (const w of words) {
+        const txt = (w.text || "").toUpperCase();
+        if (txt === "MY" || txt.includes("MY")) { hit = w; break; }
+      }
+    }
+    if (!hit) {
+      setStatus("Auto ROI failed. Use Manual ROI.");
+      return null;
+    }
+
+    // bbox back to preview canvas coords
+    const sx = hit.bbox.x0 / down;
+    const sy = hit.bbox.y0 / down;
+    const ex = hit.bbox.x1 / down;
+    const ey = hit.bbox.y1 / down;
+
+    // text box in preview coords
+    const box = { x: sx, y: sy + cropY, w: (ex - sx), h: (ey - sy) };
+
+    // infer bar below text
+    const padX = Math.floor(W * 0.02);
+    const top = Math.min(H - 10, Math.floor(box.y + box.h * 1.1));
+    const height = Math.min(Math.floor(H * 0.16), H - top);
+
+    const candidate = { x: padX, y: top, w: W - padX * 2, h: height };
+
+    // convert to original image coords
+    return {
+      x: Math.round(candidate.x / displayScale),
+      y: Math.round(candidate.y / displayScale),
+      w: Math.round(candidate.w / displayScale),
+      h: Math.round(candidate.h / displayScale),
+    };
+  }
+
+  async function runOcrAndFill() {
+    if (!roi) {
+      setStatus("No ROI. Click Auto ROI or Manual ROI.");
+      return;
+    }
+    setStatus("OCR digits…");
+
+    // Full-res canvas
+    const full = document.createElement("canvas");
+    full.width = img.naturalWidth;
+    full.height = img.naturalHeight;
+    full.getContext("2d").drawImage(img, 0, 0);
+
+    // Crop bar
+    const bar = document.createElement("canvas");
+    bar.width = roi.w;
+    bar.height = roi.h;
+    bar.getContext("2d").drawImage(full, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+
+    const slotW = roi.w / TOTAL_SLOTS;
+
+    // 只取右下角数字区域（经验值，后面你可以微调）
+    const digitRel = { x: 0.58, y: 0.45, w: 0.40, h: 0.52 };
+
+    const worker = await Tesseract.createWorker("eng");
+    await worker.setParameters({
+      tessedit_char_whitelist: "0123456789",
+      tessedit_pageseg_mode: "7"
+    });
+
+    const nums = [];
+    for (let i = 0; i < TOTAL_SLOTS; i++) {
+      const x0 = Math.floor(i * slotW);
+      const x1 = Math.floor((i + 1) * slotW);
+      const w = Math.max(2, x1 - x0);
+
+      const dx = Math.floor(x0 + w * digitRel.x);
+      const dy = Math.floor(roi.h * digitRel.y);
+      const dw = Math.max(2, Math.floor(w * digitRel.w));
+      const dh = Math.max(2, Math.floor(roi.h * digitRel.h));
+
+      const patchCv = document.createElement("canvas");
+      patchCv.width = dw;
+      patchCv.height = dh;
+      patchCv.getContext("2d").drawImage(bar, dx, dy, dw, dh, 0, 0, dw, dh);
+
+      const patchData = patchCv.getContext("2d").getImageData(0, 0, dw, dh);
+      const pre = preprocessDigitPatch(patchData, 3);
+
+      const o = document.createElement("canvas");
+      o.width = pre.width;
+      o.height = pre.height;
+      o.getContext("2d").putImageData(pre, 0, 0);
+
+      const { data } = await worker.recognize(o);
+      nums.push(cleanNumber(data.text));
+
+      setStatus(`OCR ${i + 1}/${TOTAL_SLOTS}`);
+    }
+
+    await worker.terminate();
+
+    // 写入 INVENTORY
+    for (let i = 0; i < TOTAL_SLOTS; i++) {
+      const key = MATERIAL_ORDER_EN_FIXED[i];
+      INVENTORY[key] = nums[i] ?? 0;
+    }
+
+    // 用当前库存表顺序刷新（如果你还没加载完，就 fallback 固定顺序）
+    const order = [];
+    document.querySelectorAll("#invBody tr").forEach(tr => {
+      const k = tr.children[0]?.dataset?.key;
+      if (k) order.push(k);
+    });
+
+    if (order.length) renderInventory(order);
+    else renderInventory(MATERIAL_ORDER_EN_FIXED);
+
+    setStatus("OCR done ✅ Inventory filled.");
+  }
+
+  // --- file load ---
+  shotFile.addEventListener("change", () => {
+    const f = shotFile.files?.[0];
+    if (!f) return;
+
+    const url = URL.createObjectURL(f);
+    img = new Image();
+    img.onload = () => {
+      imgLoaded = true;
+      roi = null;
+      manualMode = false;
+      clickPts = [];
+      drawPreview();
+      setStatus("Screenshot loaded ✅ (click Auto ROI)");
+    };
+    img.src = url;
+  });
+
+  autoRoiBtn.addEventListener("click", async () => {
+    if (!imgLoaded) return;
+    roi = await autoFindRoi();
+    if (roi) {
+      drawPreview();
+      setStatus("Auto ROI ok ✅");
+    }
+  });
+
+  manualRoiBtn.addEventListener("click", () => {
+    if (!imgLoaded) return;
+    manualMode = true;
+    clickPts = [];
+    roi = null;
+    drawPreview();
+    setStatus("Manual ROI: click TOP-LEFT then BOTTOM-RIGHT");
+  });
+
+  // manual ROI: click 2 points
+  ocrCanvas.addEventListener("click", (e) => {
+    if (!manualMode) return;
+
+    const rect = ocrCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    clickPts.push({ x, y });
+
+    if (clickPts.length === 2) {
+      manualMode = false;
+      const p0 = clickPts[0], p1 = clickPts[1];
+      const x0 = Math.min(p0.x, p1.x);
+      const y0 = Math.min(p0.y, p1.y);
+      const x1 = Math.max(p0.x, p1.x);
+      const y1 = Math.max(p0.y, p1.y);
+
+      roi = {
+        x: Math.round(x0 / displayScale),
+        y: Math.round(y0 / displayScale),
+        w: Math.round((x1 - x0) / displayScale),
+        h: Math.round((y1 - y0) / displayScale),
+      };
+      drawPreview();
+      setStatus("Manual ROI set ✅ (click OCR → Fill)");
+    }
+  });
+
+  ocrBtn.addEventListener("click", async () => {
+    if (!imgLoaded) return;
+    await runOcrAndFill();
+  });
+
+  // redraw on resize
+  window.addEventListener("resize", () => drawPreview());
+}
+
